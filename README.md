@@ -90,15 +90,89 @@ streamlit run app.py
 
 ### 1. 지능형 경로 탐색 시스템
 
-#### 구현 방법
+#### 작동 원리
+경로 탐색 시스템은 **그래프 이론**과 **최단 경로 알고리즘**을 기반으로 작동합니다. 도시의 모든 도로를 **노드(교차점)**와 **엣지(도로)**로 구성된 그래프로 모델링하여, 출발지에서 목적지까지의 최적 경로를 찾습니다.
+
+#### 단계별 처리 과정
+
+**1단계: 도로 네트워크 구축**
+```python
+def get_daegu_graph():
+    """
+    OpenStreetMap에서 대구 지역의 도로 네트워크를 다운로드하여 
+    NetworkX 그래프 객체로 변환
+    """
+    # 대구 지역 경계 설정 (위도, 경도)
+    daegu_bounds = [35.7, 35.9, 128.5, 128.7]
+    
+    # OSM에서 도로 데이터 추출 (자동차 도로만)
+    G = ox.graph_from_bbox(
+        north=daegu_bounds[1], south=daegu_bounds[0],
+        east=daegu_bounds[3], west=daegu_bounds[2],
+        network_type='drive'
+    )
+    return G
+```
+
+**2단계: POI(관심 지점) 고려 경로 탐색**
 ```python
 def find_route_with_pois(G, start, end, pois, max_dist=200):
     """
-    POI(Points of Interest)를 고려한 경로 탐색
-    - 최단 경로를 먼저 찾음
-    - 경로 주변에 충전기/지원센터가 있는지 확인
-    - 없다면 가장 가까운 POI를 경유지로 추가
+    POI를 고려한 경로 탐색 알고리즘
+    
+    알고리즘:
+    1. Dijkstra 알고리즘으로 최단 경로 계산
+    2. 경로 상의 각 지점에서 POI까지의 거리 계산
+    3. 만약 경로에서 200m 이내에 POI가 없다면:
+       - 가장 가까운 POI를 찾아서 경유지로 추가
+       - 새로운 경로: 출발지 → POI → 목적지
     """
+    # 1단계: 기본 최단 경로 찾기
+    shortest_path = nx.shortest_path(G, start_node, end_node, weight='length')
+    
+    # 2단계: 경로 주변 POI 확인
+    poi_near_path = False
+    for point in shortest_path:
+        for poi in pois:
+            distance = haversine_distance(point[0], point[1], poi['lat'], poi['lon'])
+            if distance <= max_dist:
+                poi_near_path = True
+                break
+    
+    # 3단계: POI가 멀면 경유지 추가
+    if not poi_near_path:
+        nearest_poi = find_nearest_poi(shortest_path, pois)
+        via_route = nx.shortest_path(G, start_node, nearest_poi_node, weight='length')
+        via_route.extend(nx.shortest_path(G, nearest_poi_node, end_node, weight='length')[1:])
+        return via_route, nearest_poi
+    
+    return shortest_path, None
+```
+
+**3단계: 거리 계산 (Haversine 공식)**
+```python
+def haversine_distance(lat1, lon1, lat2, lon2):
+    """
+    지구의 곡률을 고려한 두 지점 간의 실제 거리 계산
+    
+    수학적 원리:
+    - 지구를 구체로 가정
+    - 위도/경도 차이를 라디안으로 변환
+    - 구면 삼각법 공식 적용
+    """
+    R = 6371000  # 지구 반지름 (미터)
+    
+    # 위도/경도 차이를 라디안으로 변환
+    dlat = math.radians(lat2 - lat1)
+    dlon = math.radians(lon2 - lon1)
+    
+    # Haversine 공식
+    a = (math.sin(dlat/2)**2 + 
+         math.cos(math.radians(lat1)) * math.cos(math.radians(lat2)) * 
+         math.sin(dlon/2)**2)
+    c = 2 * math.atan2(math.sqrt(a), math.sqrt(1-a))
+    
+    return R * c  # 실제 거리 (미터)
 ```
 
 #### 개발 과정에서의 어려움
@@ -108,24 +182,192 @@ def find_route_with_pois(G, start, end, pois, max_dist=200):
 
 ### 2. 실시간 증강현실 시스템
 
-#### 컴퓨터비전 파이프라인
+#### 컴퓨터비전 기반 도로/보행로 분할
+
+**HSV 색상 공간을 활용한 이미지 분할**
 ```python
 class RoadSegmentation:
     def segment_road_sidewalk(self, frame):
-        """HSV 색상 공간을 활용한 도로/보행로 분할"""
+        """
+        HSV 색상 공간에서 도로와 보행로를 구분하는 알고리즘
         
-    def detect_lanes(self, frame):
-        """Canny 엣지 검출 및 Hough 변환을 통한 차선 검출"""
+        원리:
+        1. RGB → HSV 변환 (색상, 채도, 명도 분리)
+        2. 명도(Value) 값으로 도로/보행로 구분
+           - 도로: 어두운 회색 (V < 100)
+           - 보행로: 밝은 회색 (V > 100)
+        3. 마스크 생성 및 노이즈 제거
+        """
+        # RGB → HSV 변환
+        hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+        
+        # 도로 마스크 (어두운 영역)
+        road_mask = cv2.inRange(hsv, (0, 0, 0), (180, 255, 100))
+        
+        # 보행로 마스크 (밝은 영역)
+        sidewalk_mask = cv2.inRange(hsv, (0, 0, 100), (180, 255, 255))
+        
+        # 노이즈 제거 (모폴로지 연산)
+        kernel = np.ones((5,5), np.uint8)
+        road_mask = cv2.morphologyEx(road_mask, cv2.MORPH_CLOSE, kernel)
+        sidewalk_mask = cv2.morphologyEx(sidewalk_mask, cv2.MORPH_CLOSE, kernel)
+        
+        return road_mask, sidewalk_mask
 ```
 
-#### AR 오버레이 시스템
+**차선 검출 알고리즘**
+```python
+def detect_lanes(self, frame):
+    """
+    Canny 엣지 검출 + Hough 변환을 통한 차선 검출
+    
+    처리 과정:
+    1. 그레이스케일 변환
+    2. 가우시안 블러로 노이즈 제거
+    3. Canny 엣지 검출 (경계선 찾기)
+    4. 관심 영역(ROI) 설정
+    5. Hough 변환으로 직선 검출
+    """
+    # 1단계: 그레이스케일 변환
+    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    
+    # 2단계: 가우시안 블러
+    blurred = cv2.GaussianBlur(gray, (5, 5), 0)
+    
+    # 3단계: Canny 엣지 검출
+    edges = cv2.Canny(blurred, 50, 150)
+    
+    # 4단계: 관심 영역 설정 (화면 하단 절반)
+    height, width = edges.shape
+    roi_vertices = np.array([
+        [(0, height), (width/2, height/2), (width, height)]
+    ], dtype=np.int32)
+    
+    mask = np.zeros_like(edges)
+    cv2.fillPoly(mask, roi_vertices, 255)
+    masked_edges = cv2.bitwise_and(edges, mask)
+    
+    # 5단계: Hough 변환으로 직선 검출
+    lines = cv2.HoughLinesP(
+        masked_edges, 1, np.pi/180, 
+        threshold=50, minLineLength=100, maxLineGap=50
+    )
+    
+    return lines
+```
+
+#### 증강현실 오버레이 시스템
+
+**방향 안내 화살표 생성**
 ```python
 class ARNavigation:
-    def draw_direction_arrow(self, frame, direction_angle):
-        """방향 안내 화살표 그리기"""
+    def draw_direction_arrow(self, frame, direction_angle, center=(320, 240)):
+        """
+        현재 위치에서 목적지까지의 방향을 화살표로 표시
         
-    def put_korean_text(self, img, text, position):
-        """한국어 텍스트 렌더링 (크로스플랫폼 지원)"""
+        수학적 원리:
+        1. 현재 위치와 목적지 좌표로 방향각 계산
+        2. 화살표의 시작점, 끝점, 화살표 머리 계산
+        3. OpenCV로 화살표 그리기
+        """
+        # 화살표 길이와 두께 설정
+        arrow_length = 80
+        arrow_thickness = 3
+        
+        # 방향각을 라디안으로 변환
+        angle_rad = math.radians(direction_angle)
+        
+        # 화살표 끝점 계산
+        end_x = int(center[0] + arrow_length * math.cos(angle_rad))
+        end_y = int(center[1] - arrow_length * math.sin(angle_rad))
+        
+        # 화살표 그리기
+        cv2.arrowedLine(
+            frame, center, (end_x, end_y),
+            color=(0, 255, 0), thickness=arrow_thickness,
+            tipLength=0.3
+        )
+        
+        # 화살표 머리 그리기
+        tip_length = 20
+        tip_angle = math.pi / 6  # 30도
+        
+        tip1_x = int(end_x - tip_length * math.cos(angle_rad + tip_angle))
+        tip1_y = int(end_y + tip_length * math.sin(angle_rad + tip_angle))
+        tip2_x = int(end_x - tip_length * math.cos(angle_rad - tip_angle))
+        tip2_y = int(end_y + tip_length * math.sin(angle_rad - tip_angle))
+        
+        cv2.line(frame, (end_x, end_y), (tip1_x, tip1_y), (0, 255, 0), 2)
+        cv2.line(frame, (end_x, end_y), (tip2_x, tip2_y), (0, 255, 0), 2)
+```
+
+**한국어 텍스트 렌더링**
+```python
+def put_korean_text(self, img, text, position, font_size=30, color=(255, 255, 255)):
+    """
+    PIL을 활용한 한국어 텍스트 렌더링
+    
+    처리 과정:
+    1. OpenCV 이미지를 PIL 이미지로 변환
+    2. 시스템 폰트 로드 (크로스플랫폼)
+    3. 텍스트 렌더링
+    4. PIL 이미지를 OpenCV 이미지로 변환
+    """
+    # OpenCV → PIL 변환
+    img_pil = Image.fromarray(cv2.cvtColor(img, cv2.COLOR_BGR2RGB))
+    
+    # 폰트 로드 (플랫폼별)
+    if platform.system() == 'Darwin':  # macOS
+        font_path = '/System/Library/Fonts/AppleSDGothicNeo.ttc'
+    elif platform.system() == 'Windows':
+        font_path = 'C:/Windows/Fonts/malgun.ttf'
+    else:  # Linux
+        font_path = '/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf'
+    
+    font = ImageFont.truetype(font_path, font_size)
+    
+    # 텍스트 그리기
+    draw = ImageDraw.Draw(img_pil)
+    draw.text(position, text, font=font, fill=color)
+    
+    # PIL → OpenCV 변환
+    img_cv = cv2.cvtColor(np.array(img_pil), cv2.COLOR_RGB2BGR)
+    return img_cv
+```
+
+#### 실시간 처리 파이프라인
+```python
+def process_frame_for_ar(frame, current_pos, target_pos):
+    """
+    실시간 AR 처리 파이프라인
+    
+    처리 순서:
+    1. 도로/보행로 분할
+    2. 차선 검출
+    3. 방향 및 거리 계산
+    4. AR 오버레이 적용
+    5. 한국어 텍스트 추가
+    """
+    # 1단계: 도로 분할
+    road_seg = RoadSegmentation()
+    road_mask, sidewalk_mask = road_seg.segment_road_sidewalk(frame)
+    lanes = road_seg.detect_lanes(frame)
+    
+    # 2단계: AR 오버레이
+    ar_nav = ARNavigation()
+    
+    # 방향 및 거리 계산
+    direction_angle = calculate_direction(current_pos, target_pos)
+    distance = haversine_distance(
+        current_pos[0], current_pos[1],
+        target_pos[0], target_pos[1]
+    )
+    
+    # 3단계: AR 요소 추가
+    ar_nav.draw_direction_arrow(frame, direction_angle)
+    ar_nav.add_navigation_info(frame, distance, direction_angle, current_pos, target_pos)
+    
+    return frame
 ```
 
 #### 개발 과정에서의 어려움
