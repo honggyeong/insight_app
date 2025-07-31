@@ -5,8 +5,6 @@ from PIL import Image, ImageDraw, ImageFont
 import math
 import threading
 import time
-from sklearn.cluster import DBSCAN
-from sklearn.preprocessing import StandardScaler
 
 class RoadSegmentation:
     """차도와 보행로를 구분하는 클래스"""
@@ -53,146 +51,11 @@ class RoadSegmentation:
         
         return lines
 
-class LocationTracker:
-    """GPS와 컴퓨터비전을 결합한 위치 추적 클래스"""
-    
-    def __init__(self):
-        self.landmark_database = {}  # 지형지물 데이터베이스
-        self.gps_history = []  # GPS 위치 히스토리
-        self.vision_history = []  # 비전 기반 위치 히스토리
-        self.fused_location = None  # 융합된 위치
-        
-    def add_landmark(self, name, lat, lon, features):
-        """지형지물 데이터베이스에 추가"""
-        self.landmark_database[name] = {
-            'lat': lat,
-            'lon': lon,
-            'features': features
-        }
-    
-    def detect_landmarks_in_image(self, frame):
-        """이미지에서 지형지물 감지"""
-        landmarks = []
-        
-        # 건물 감지 (간단한 엣지 검출 기반)
-        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        edges = cv2.Canny(gray, 50, 150)
-        
-        # 윤곽선 찾기
-        contours, _ = cv2.findContours(edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        
-        for contour in contours:
-            area = cv2.contourArea(contour)
-            if area > 1000:  # 충분히 큰 객체만
-                x, y, w, h = cv2.boundingRect(contour)
-                landmarks.append({
-                    'type': 'building',
-                    'bbox': (x, y, w, h),
-                    'area': area,
-                    'center': (x + w//2, y + h//2)
-                })
-        
-        return landmarks
-    
-    def estimate_position_from_landmarks(self, detected_landmarks, gps_estimate):
-        """감지된 지형지물을 기반으로 위치 추정"""
-        if not detected_landmarks:
-            return gps_estimate
-        
-        # GPS 추정치를 중심으로 주변 지형지물 검색
-        search_radius = 0.001  # 약 100m
-        nearby_landmarks = []
-        
-        for name, landmark in self.landmark_database.items():
-            dist = haversine_distance(
-                gps_estimate[0], gps_estimate[1],
-                landmark['lat'], landmark['lon']
-            )
-            if dist < 100:  # 100m 이내
-                nearby_landmarks.append((name, landmark, dist))
-        
-        if not nearby_landmarks:
-            return gps_estimate
-        
-        # 가장 가까운 지형지물 기반으로 위치 보정
-        nearest_landmark = min(nearby_landmarks, key=lambda x: x[2])
-        return (nearest_landmark[1]['lat'], nearest_landmark[1]['lon'])
-    
-    def update_gps_location(self, lat, lon, accuracy=None):
-        """GPS 위치 업데이트"""
-        self.gps_history.append({
-            'lat': lat,
-            'lon': lon,
-            'accuracy': accuracy,
-            'timestamp': time.time()
-        })
-        
-        # 최근 10개 GPS 위치만 유지
-        if len(self.gps_history) > 10:
-            self.gps_history.pop(0)
-    
-    def update_vision_location(self, frame, gps_estimate):
-        """비전 기반 위치 업데이트"""
-        landmarks = self.detect_landmarks_in_image(frame)
-        vision_estimate = self.estimate_position_from_landmarks(landmarks, gps_estimate)
-        
-        self.vision_history.append({
-            'lat': vision_estimate[0],
-            'lon': vision_estimate[1],
-            'landmarks': landmarks,
-            'timestamp': time.time()
-        })
-        
-        # 최근 10개 비전 위치만 유지
-        if len(self.vision_history) > 10:
-            self.vision_history.pop(0)
-        
-        return vision_estimate
-    
-    def fuse_locations(self, gps_weight=0.7, vision_weight=0.3):
-        """GPS와 비전 위치 융합"""
-        if not self.gps_history or not self.vision_history:
-            return None
-        
-        # 최신 GPS 위치
-        latest_gps = self.gps_history[-1]
-        
-        # 최신 비전 위치
-        latest_vision = self.vision_history[-1]
-        
-        # 가중 평균으로 위치 융합
-        fused_lat = gps_weight * latest_gps['lat'] + vision_weight * latest_vision['lat']
-        fused_lon = gps_weight * latest_gps['lon'] + vision_weight * latest_vision['lon']
-        
-        self.fused_location = (fused_lat, fused_lon)
-        return self.fused_location
-    
-    def get_trajectory(self):
-        """이동 궤적 반환"""
-        trajectory = []
-        
-        # GPS 궤적
-        gps_traj = [(p['lat'], p['lon']) for p in self.gps_history]
-        
-        # 비전 궤적
-        vision_traj = [(p['lat'], p['lon']) for p in self.vision_history]
-        
-        # 융합 궤적
-        if self.fused_location:
-            trajectory.append(self.fused_location)
-        
-        return {
-            'gps': gps_traj,
-            'vision': vision_traj,
-            'fused': trajectory
-        }
-
 class ARNavigation:
     """증강현실 길안내 클래스"""
     
     def __init__(self):
         self.font_path = self._get_font_path()
-        self.location_tracker = LocationTracker()
         
     def _get_font_path(self):
         """시스템 폰트 경로 찾기"""
@@ -275,22 +138,6 @@ class ARNavigation:
         # 현재 위치 정보
         pos_text = f"현재: ({current_pos[0]:.5f}, {current_pos[1]:.5f})"
         frame = self.put_korean_text(frame, pos_text, (10, 110), 20, (200, 200, 200))
-        
-        return frame
-    
-    def add_location_tracking_info(self, frame, gps_pos, vision_pos, fused_pos):
-        """위치 추적 정보 추가"""
-        # GPS 위치
-        gps_text = f"GPS: ({gps_pos[0]:.5f}, {gps_pos[1]:.5f})"
-        frame = self.put_korean_text(frame, gps_text, (10, 140), 18, (0, 255, 255))
-        
-        # 비전 위치
-        vision_text = f"비전: ({vision_pos[0]:.5f}, {vision_pos[1]:.5f})"
-        frame = self.put_korean_text(frame, vision_text, (10, 160), 18, (255, 0, 255))
-        
-        # 융합 위치
-        fused_text = f"융합: ({fused_pos[0]:.5f}, {fused_pos[1]:.5f})"
-        frame = self.put_korean_text(frame, fused_text, (10, 180), 18, (0, 255, 0))
         
         return frame
 
@@ -399,33 +246,3 @@ def process_frame_for_ar(frame, current_pos, target_pos):
     processed_frame = ar_nav.add_navigation_info(frame, distance, direction, current_pos, target_pos)
     
     return processed_frame
-
-def process_frame_with_location_tracking(frame, gps_pos, target_pos):
-    """위치 추적이 포함된 프레임 처리"""
-    ar_nav = ARNavigation()
-    road_seg = RoadSegmentation()
-    
-    # GPS 위치 업데이트
-    ar_nav.location_tracker.update_gps_location(gps_pos[0], gps_pos[1])
-    
-    # 비전 기반 위치 추정
-    vision_pos = ar_nav.location_tracker.update_vision_location(frame, gps_pos)
-    
-    # 위치 융합
-    fused_pos = ar_nav.location_tracker.fuse_locations()
-    
-    if fused_pos is None:
-        fused_pos = gps_pos
-    
-    # 거리와 방향 계산 (융합된 위치 사용)
-    distance = haversine_distance(fused_pos[0], fused_pos[1], target_pos[0], target_pos[1])
-    direction = math.degrees(math.atan2(target_pos[0] - fused_pos[0], target_pos[1] - fused_pos[1]))
-    direction = (direction + 360) % 360
-    
-    # AR 정보 추가
-    processed_frame = ar_nav.add_navigation_info(frame, distance, direction, fused_pos, target_pos)
-    
-    # 위치 추적 정보 추가
-    processed_frame = ar_nav.add_location_tracking_info(frame, gps_pos, vision_pos, fused_pos)
-    
-    return processed_frame, fused_pos
