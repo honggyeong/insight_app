@@ -1,0 +1,15 @@
+streamlit
+streamlit-folium
+folium
+osmnx
+networkx
+pandas
+opencv-python
+geopandas
+numpy
+pillow
+streamlit-webrtc
+av
+mediapipe
+tensorflow
+scikit-learn
